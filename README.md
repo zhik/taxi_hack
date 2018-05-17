@@ -6,6 +6,7 @@
 adapted from [https://github.com/toddwschneider/nyc-taxi-data](https://github.com/toddwschneider/nyc-taxi-data)
 
 - create table
+
 ```sql
 CREATE TABLE yellow_tripdata_2017 (
   id serial primary key,
@@ -31,10 +32,13 @@ CREATE TABLE yellow_tripdata_2017 (
 ```
 
 - copy csv to database
+
 ```
 \copy yellow_tripdata_2017 (vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FROM 'C:/Users/base/Desktop/taxi hack/data/2017_Yellow_Taxi_Trip_Data.csv' CSV HEADER;
 ```
+
 - optimize database and add columns
+
 ```sql
 VACUUM ANALYZE yellow_tripdata_2017;
 
@@ -43,6 +47,7 @@ ADD COLUMN tstamp timestamp;
 
 UPDATE yellow_tripdata_2017 SET tstamp = to_timestamp(tpep_pickup_datetime, 'MM/DD/YYYY HH:MI:SS AM');
 ```
+
 it takes a long time for a query, wait
 ![it takes a long time for a query](images/bigdata.png)
 
@@ -69,10 +74,10 @@ select extract(doy from tstamp) as doy , count(id) from yellow_tripdata_2017 gro
 ![python - build distanceMatrix for query](images/2.png)
 
 3. setting up google directions queries (python) , 4 time buckets 
-- 8am Weekdays (6/6) - (morning rush-hours 6 - 10am)
-- 2pm Weekdays (6/6) - (non-rush hours)
-- 6pm Weekdays (6/6) - (night rush-hours 4 - 8pm)
-- 2pm Weekends (6/9) - (non-rush hours)
+- 8am Weekdays (6/6) - (morning rush-hours 6 - 10am) - 1
+- 2pm Weekdays (6/6) - (non-rush hours) - 2
+- 6pm Weekdays (6/6) - (night rush-hours 4 - 8pm) - 3 
+- 2pm Weekends (6/9) - (non-rush hours) - 0
 
 ![python - setting up google directions queries](images/3.png)
 
@@ -128,44 +133,37 @@ VACUUM ANALYZE legs;
 
 ![dissolved congestion zone](images/zone.png)
 
-2. add column for which time bucket each trip belongs to
-
-```sql
-ALTER TABLE yellow_tripdata_2017
-ADD COLUMN bucket integer;
-
-
-
-```
-3. creating a sql view for only taxi trips with in and out of zones
-
-```sql
-CREATE VIEW yellow_tripdata_2017_fromtozones AS 
-  SELECT id, bucket, pickup_location_id, dropoff_location_id, trip_distance FROM yellow_tripdata_2017 
-  WHERE 
-    pickup_location_id in (4,12,13,43,45,48,50,68,79,87,88,90,100,107,113,114,125,137,140,141,142,143,144,148,158,161,162,163,164,170,186,209,211,224,229,230,231,232,233,234,236,237,238,239,246,249,261,262,263) 
-    OR dropoff_location_id in (4,12,13,43,45,48,50,68,79,87,88,90,100,107,113,114,125,137,140,141,142,143,144,148,158,161,162,163,164,170,186,209,211,224,229,230,231,232,233,234,236,237,238,239,246,249,261,262,263) 
-
-```
-
 
 ## D. Analysis
 
-1. get counts group by bucket, pickup_location_id, dropoff_location_id
+1. get counts group by time/date bucket, pickup_location_id, dropoff_location_id
 
 ```sql
-
+select extract(hour from tstamp) as hour ,extract(dow from tstamp) as dow, pickup_location_id, dropoff_location_id,  count(id) from yellow_tripdata_2017 group by hour, dow, pickup_location_id, dropoff_location_id
 ```
 
-2. calcaute percentage in congestion zone
+use processCounts to put them into buckets
+
+
+2. calcaute percentage in congestion zone of each route
+
+Calcaute percentage of each leg
 
 ```sql
-Using the SQL group by function and Sum will get the total dwell time and distance of each route
-SELECT route_id, SUM(percent * leg_time) as dwell_time, SUM(percent * leg_distance) as dwell time FROM leg_table GROUP BY route_id
+ALTER TABLE legs
+ADD COLUMN inZone numeric;
+
+UPDATE legs SET inZone = st_length(st_intersection(legs.geom, dissolved_newcongestionzone.geom))/st_length(legs.geom)FROM dissolved_newcongestionzone WHERE ST_Intersects(legs.geom, dissolved_newcongestionzone.geom)
 ```
 
-3. calcaute number crosses per zone
 
+export routes 
 ```sql
-SELECT (count(st_intersection(st_boundary(congestion.geom),route_table.route_geom))).geom AS points FROM route_table, congestion WHERE st_intersects(congestion.geom,route_table.route_geom);
+select fromid, toid, timebucket, inzone * distance as distance_inZone, inzone * duration as duration_inZone, geom from legs group by fromid, toid, timebucket
+```
+
+dissolve routes by fromid, toid and timebucket
+```sql
+select fromid, toid, timebucket, sum(inzone * distance) as distance_inZone, sum(inzone * duration) as duration_inZone, st_union(geom) as geom
+from legs group by fromid, toid, timebucket
 ```
